@@ -88,7 +88,21 @@ namespace XCache
         using NodeMap = std::unordered_map<Key, NodePtr>;
 
         XLFUCache(int capacity_, int maxAvgFreq = 1000000) : capacity(capacity_), maxAverageFreq(maxAvgFreq), curAverageFreq(0), curTotalFreq(0), minFreq(INT8_MAX) {}
-        ~XLFUCache() override = default;
+        
+        // 新增构造函数，支持更灵活的参数调整
+        XLFUCache(int capacity_, int maxAvgFreq, int agingThreshold, double agingFactor) 
+            : capacity(capacity_), maxAverageFreq(maxAvgFreq), curAverageFreq(0), curTotalFreq(0), minFreq(INT8_MAX),
+              agingThreshold(agingThreshold), agingFactor(agingFactor) {}
+        ~XLFUCache() override 
+        {
+            // 释放freqMap中的所有Freqlist对象
+            for (auto& pair : freqMap)
+            {
+                delete pair.second;
+                pair.second = nullptr;
+            }
+            freqMap.clear();
+        }
         void put(Key key, Value value) override
         {
             if (capacity == 0)
@@ -98,7 +112,8 @@ namespace XCache
             if (it != nodeMap.end())
             {
                 it->second->value = value;
-                putInternal(key, value);
+                // 更新现有节点的频率
+                getInternal(it->second, value);
                 return;
             }
             putInternal(key, value);
@@ -124,8 +139,18 @@ namespace XCache
 
         void purge()
         {
+            std::lock_guard<std::mutex> lock(mtx);
             nodeMap.clear();
+            // 释放freqMap中的所有Freqlist对象
+            for (auto& pair : freqMap)
+            {
+                delete pair.second;
+                pair.second = nullptr;
+            }
             freqMap.clear();
+            minFreq = INT8_MAX;
+            curTotalFreq = 0;
+            curAverageFreq = 0;
         }
 
     private:
@@ -138,8 +163,10 @@ namespace XCache
 
         void addFreqNum();             // 增加频率
         void decreaseFreqNum(int num); // 减少频率
-        void HaddleOverMaxAvgFreq();   // 处理超过最大平均频率的情况
+        void HandleOverMaxAvgFreq();   // 处理超过最大平均频率的情况
         void updateMinFreq();          // 更新最小频率
+        void performAging();           // 执行频率衰减
+        void recalculateFreqStats();   // 重新计算频率统计信息
 
     private:
         int capacity;
@@ -147,6 +174,12 @@ namespace XCache
         int maxAverageFreq;
         int curAverageFreq;
         int curTotalFreq;
+        
+        // 新增：LFU-Aging优化参数
+        int agingThreshold = 10000;    // 触发频率衰减的阈值
+        double agingFactor = 0.8;      // 频率衰减因子
+        int operationCount = 0;         // 操作计数器
+        
         std::mutex mtx;
         NodeMap nodeMap; // key到节点的映射
         std::unordered_map<int, Freqlist<Key, Value> *> freqMap;
@@ -183,7 +216,15 @@ namespace XCache
     template <typename Key, typename Value>
     void XLFUCache<Key, Value>::kickout()
     {
-        NodePtr node = freqMap[minFreq]->getfirstNode();
+        auto it = freqMap.find(minFreq);
+        if (it == freqMap.end() || it->second->isEmpty())
+        {
+            updateMinFreq();
+            it = freqMap.find(minFreq);
+            if (it == freqMap.end())
+                return;
+        }
+        NodePtr node = it->second->getfirstNode();
         removeFromFreqlist(node);
         nodeMap.erase(node->key);
         decreaseFreqNum(node->freq);
@@ -213,12 +254,66 @@ namespace XCache
     void XLFUCache<Key, Value>::addFreqNum()
     {
         curTotalFreq++;
+        operationCount++;
+        
         if (nodeMap.empty())
             curAverageFreq = 0;
         else
             curAverageFreq = curTotalFreq / nodeMap.size();
-        if (curAverageFreq > maxAverageFreq)
-            HaddleOverMaxAvgFreq();
+            
+        // 改进的频率衰减机制：基于操作次数和平均频率
+        if (operationCount % agingThreshold == 0 || curAverageFreq > maxAverageFreq)
+        {
+            performAging();
+        }
+    }
+    
+    template <typename Key, typename Value>
+    void XLFUCache<Key, Value>::performAging()
+    {
+        if (nodeMap.empty())
+            return;
+        
+        // 更温和的频率衰减：按比例衰减而不是固定减半
+        std::vector<NodePtr> nodes;
+        for (const auto& pair : nodeMap)
+        {
+            if (pair.second)
+                nodes.push_back(pair.second);
+        }
+        
+        for (NodePtr node : nodes)
+        {
+            if (!node) continue;
+            removeFromFreqlist(node);
+            
+            // 使用衰减因子进行频率衰减
+            node->freq = static_cast<int>(node->freq * agingFactor);
+            if (node->freq < 1)
+                node->freq = 1;
+                
+            addToFreqlist(node);
+        }
+        
+        // 重新计算总频率和平均频率
+        recalculateFreqStats();
+        updateMinFreq();
+    }
+    
+    template <typename Key, typename Value>
+    void XLFUCache<Key, Value>::recalculateFreqStats()
+    {
+        curTotalFreq = 0;
+        for (const auto& pair : nodeMap)
+        {
+            if (pair.second)
+                curTotalFreq += pair.second->freq;
+        }
+        
+        if (nodeMap.empty())
+            curAverageFreq = 0;
+        else
+            curAverageFreq = curTotalFreq / nodeMap.size();
     }
 
     template <typename Key, typename Value>
@@ -232,15 +327,23 @@ namespace XCache
     }
 
     template <typename Key, typename Value>
-    void XLFUCache<Key, Value>::HaddleOverMaxAvgFreq()
+    void XLFUCache<Key, Value>::HandleOverMaxAvgFreq()
     {
         if (nodeMap.empty())
             return;
-        for (auto it = nodeMap.begin(); it != nodeMap.end(); ++it)
+        
+        // 先收集所有节点，避免在遍历过程中修改容器
+        std::vector<NodePtr> nodes;
+        for (const auto& pair : nodeMap)
         {
-            if (!it->second)
-                continue;
-            NodePtr node = it->second;
+            if (pair.second)
+                nodes.push_back(pair.second);
+        }
+        
+        // 然后处理每个节点
+        for (NodePtr node : nodes)
+        {
+            if (!node) continue;
             removeFromFreqlist(node);
             node->freq -= maxAverageFreq / 2;
             if (node->freq < 1)

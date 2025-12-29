@@ -189,6 +189,7 @@ namespace XCache
 
             if (historycount >= k) // 如果历史访问次数达到K次，将节点移动到主缓存中
             {
+                std::lock_guard<std::mutex> lock(historyMtx);
                 auto it = historyMap.find(key);
                 if (it != historyMap.end())
                 {
@@ -204,8 +205,8 @@ namespace XCache
 
         void put(Key key, Value value) override
         {
-            Value exsitingValue{};
-            bool inMainCache = XLRUCache<Key, Value>::get(key, exsitingValue);
+            Value existingValue{};
+            bool inMainCache = XLRUCache<Key, Value>::get(key, existingValue);
             if (inMainCache)
             {
                 XLRUCache<Key, Value>::put(key, value);
@@ -214,11 +215,19 @@ namespace XCache
             size_t historyCount = historyList->get(key);
             historyCount++;
             historyList->put(key, historyCount);
-            historyMap[key] = value;
+            
+            {
+                std::lock_guard<std::mutex> lock(historyMtx);
+                historyMap[key] = value;
+            }
+            
             if (historyCount >= k)
             {
                 historyList->remove(key);
-                historyMap.erase(key);
+                {
+                    std::lock_guard<std::mutex> lock(historyMtx);
+                    historyMap.erase(key);
+                }
                 XLRUCache<Key, Value>::put(key, value);
             }
         }
@@ -227,6 +236,7 @@ namespace XCache
         int k;
         std::unique_ptr<XLRUCache<Key, size_t>> historyList;
         std::unordered_map<Key, Value> historyMap;
+        std::mutex historyMtx; // 为historyMap添加独立的互斥锁
     };
 
     template <typename Key, typename Value>

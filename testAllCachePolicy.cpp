@@ -10,6 +10,7 @@
 #include "XLFUCache.h"
 #include "XLRUCache.h"
 #include "XArcCache/XArcCache.h"
+#include "XAdaptiveCache.h"
 
 class Timer
 {
@@ -48,6 +49,10 @@ void printResults(const std::string &testName, int capacity,
     {
         names = {"LRU", "LFU", "ARC", "LRU-K", "LFU-Aging"};
     }
+    else if (hits.size() == 6)
+    {
+        names = {"LRU", "LFU", "ARC", "LRU-K", "LFU-Aging", "Adaptive"};
+    }
 
     for (size_t i = 0; i < hits.size(); ++i)
     {
@@ -79,16 +84,19 @@ void testHotDataAccess()
     // - 历史记录容量设为可能访问的所有键数量
     // - k=2表示数据被访问2次后才会进入缓存，适合区分热点和冷数据
     XCache::XLRUKCache<int, std::string> lruk(CAPACITY, HOT_KEYS + COLD_KEYS, 2);
-    XCache::XLFUCache<int, std::string> lfuAging(CAPACITY, 20000);
+    // 优化的LFU-Aging：更激进的衰减策略
+    XCache::XLFUCache<int, std::string> lfuAging(CAPACITY, 50000, 5000, 0.7);
+    // 自适应缓存：动态选择最佳策略
+    XCache::XAdaptiveCache<int, std::string> adaptive(CAPACITY);
 
     std::random_device rd;
     std::mt19937 gen(rd());
 
-    // 基类指针指向派生类对象，添加LFU-Aging
-    std::array<XCache::XCachePolicy<int, std::string> *, 5> caches = {&lru, &lfu, &arc, &lruk, &lfuAging};
-    std::vector<int> hits(5, 0);
-    std::vector<int> get_operations(5, 0);
-    std::vector<std::string> names = {"LRU", "LFU", "ARC", "LRU-K", "LFU-Aging"};
+    // 基类指针指向派生类对象，添加LFU-Aging和Adaptive
+    std::array<XCache::XCachePolicy<int, std::string> *, 6> caches = {&lru, &lfu, &arc, &lruk, &lfuAging, &adaptive};
+    std::vector<int> hits(6, 0);
+    std::vector<int> get_operations(6, 0);
+    std::vector<std::string> names = {"LRU", "LFU", "ARC", "LRU-K", "LFU-Aging", "Adaptive"};
 
     // 为所有的缓存对象进行相同的操作序列测试
     for (int i = 0; i < caches.size(); ++i)
@@ -156,12 +164,15 @@ void testLoopPattern()
     // - 历史记录容量设为总循环大小的两倍，覆盖范围内和范围外的数据
     // - k=2，对于循环访问，这是一个合理的阈值
     XCache::XLRUKCache<int, std::string> lruk(CAPACITY, LOOP_SIZE * 2, 2);
-    XCache::XLFUCache<int, std::string> lfuAging(CAPACITY, 3000);
+    // 循环扫描场景：更频繁的衰减，适应循环模式
+    XCache::XLFUCache<int, std::string> lfuAging(CAPACITY, 10000, 2000, 0.6);
+    // 自适应缓存
+    XCache::XAdaptiveCache<int, std::string> adaptive(CAPACITY);
 
-    std::array<XCache::XCachePolicy<int, std::string> *, 5> caches = {&lru, &lfu, &arc, &lruk, &lfuAging};
-    std::vector<int> hits(5, 0);
-    std::vector<int> get_operations(5, 0);
-    std::vector<std::string> names = {"LRU", "LFU", "ARC", "LRU-K", "LFU-Aging"};
+    std::array<XCache::XCachePolicy<int, std::string> *, 6> caches = {&lru, &lfu, &arc, &lruk, &lfuAging, &adaptive};
+    std::vector<int> hits(6, 0);
+    std::vector<int> get_operations(6, 0);
+    std::vector<std::string> names = {"LRU", "LFU", "ARC", "LRU-K", "LFU-Aging", "Adaptive"};
 
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -234,15 +245,19 @@ void testWorkloadShift()
     XCache::XLRUCache<int, std::string> lru(CAPACITY);
     XCache::XLFUCache<int, std::string> lfu(CAPACITY);
     XCache::XArcCache<int, std::string> arc(CAPACITY);
-    XCache::XLRUKCache<int, std::string> lruk(CAPACITY, 500, 2);
-    XCache::XLFUCache<int, std::string> lfuAging(CAPACITY, 10000);
+    // 工作负载变化场景：适中的历史记录和k值
+    XCache::XLRUKCache<int, std::string> lruk(CAPACITY, 500, 3);
+    // 工作负载变化场景：非常激进的衰减策略
+    XCache::XLFUCache<int, std::string> lfuAging(CAPACITY, 8000, 1000, 0.5);
+    // 自适应缓存
+    XCache::XAdaptiveCache<int, std::string> adaptive(CAPACITY);
 
     std::random_device rd;
     std::mt19937 gen(rd());
-    std::array<XCache::XCachePolicy<int, std::string> *, 5> caches = {&lru, &lfu, &arc, &lruk, &lfuAging};
-    std::vector<int> hits(5, 0);
-    std::vector<int> get_operations(5, 0);
-    std::vector<std::string> names = {"LRU", "LFU", "ARC", "LRU-K", "LFU-Aging"};
+    std::array<XCache::XCachePolicy<int, std::string> *, 6> caches = {&lru, &lfu, &arc, &lruk, &lfuAging, &adaptive};
+    std::vector<int> hits(6, 0);
+    std::vector<int> get_operations(6, 0);
+    std::vector<std::string> names = {"LRU", "LFU", "ARC", "LRU-K", "LFU-Aging", "Adaptive"};
 
     // 为每种缓存算法运行相同的测试
     for (int i = 0; i < caches.size(); ++i)
