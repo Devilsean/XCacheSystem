@@ -5,9 +5,12 @@
 #include <unordered_map>
 #include <vector>
 #include <chrono>
+#include <iostream>
+#include <iomanip>
 #include "XCachePolicy.h"
 #include "XLRUCache.h"
 #include "XLFUCache.h"
+#include "XArcCache/XArcCache.h"
 
 namespace XCache
 {
@@ -19,20 +22,23 @@ namespace XCache
         {
             LRU,
             LFU,
-            LFU_AGING
+            LFU_AGING,
+            ARC
         };
 
         XAdaptiveCache(int capacity) : capacity(capacity), currentStrategy(Strategy::LFU_AGING)
         {
-            // 初始化三种缓存策略
+            // 初始化四种缓存策略
             lruCache = std::make_unique<XLRUCache<Key, Value>>(capacity);
             lfuCache = std::make_unique<XLFUCache<Key, Value>>(capacity);
             lfuAgingCache = std::make_unique<XLFUCache<Key, Value>>(capacity, 8000, 1000, 0.5);
+            arcCache = std::make_unique<XCache::XArcCache<Key, Value>>(capacity);
             
             // 性能统计
-            strategyPerformance.resize(3, {0, 0}); // hits, total
+            strategyPerformance.resize(4, {0, 0}); // 4种策略
             lastEvaluationTime = std::chrono::steady_clock::now();
-            evaluationInterval = std::chrono::seconds(10); // 每10秒评估一次
+            evaluationInterval = std::chrono::milliseconds(500); // 每0.5秒评估一次，更频繁
+            switchThreshold = 0.02; // 2%的切换阈值，更敏感
         }
 
         ~XAdaptiveCache() override = default;
@@ -45,37 +51,38 @@ namespace XCache
             lruCache->put(key, value);
             lfuCache->put(key, value);
             lfuAgingCache->put(key, value);
+            arcCache->put(key, value);
         }
 
         bool get(Key key, Value &value) override
         {
             std::lock_guard<std::mutex> lock(mtx);
             
-            // 根据当前策略选择使用哪个缓存
-            bool hit = false;
-            switch (currentStrategy)
+            // 让所有策略都执行get操作，收集性能数据
+            std::vector<bool> hits(4);
+            std::vector<Value> values(4);
+            
+            hits[0] = lruCache->get(key, values[0]);
+            hits[1] = lfuCache->get(key, values[1]);
+            hits[2] = lfuAgingCache->get(key, values[2]);
+            hits[3] = arcCache->get(key, values[3]);
+            
+            // 更新所有策略的性能统计
+            for (int i = 0; i < 4; ++i)
             {
-            case Strategy::LRU:
-                hit = lruCache->get(key, value);
-                break;
-            case Strategy::LFU:
-                hit = lfuCache->get(key, value);
-                break;
-            case Strategy::LFU_AGING:
-                hit = lfuAgingCache->get(key, value);
-                break;
+                strategyPerformance[i].total++;
+                if (hits[i])
+                    strategyPerformance[i].hits++;
             }
             
-            // 更新性能统计
+            // 返回当前策略的结果
             int strategyIndex = static_cast<int>(currentStrategy);
-            strategyPerformance[strategyIndex].total++;
-            if (hit)
-                strategyPerformance[strategyIndex].hits++;
+            value = values[strategyIndex];
             
             // 定期评估并切换策略
             evaluateAndSwitchStrategy();
             
-            return hit;
+            return hits[strategyIndex];
         }
 
         Value get(Key key) override
@@ -114,11 +121,9 @@ namespace XCache
 
         void evaluateAndSwitchStrategy()
         {
-            auto now = std::chrono::steady_clock::now();
-            if (now - lastEvaluationTime < evaluationInterval)
+            static int evaluationCount = 0;
+            if (++evaluationCount % 1000 != 0) // 每1000次get调用评估一次
                 return;
-            
-            lastEvaluationTime = now;
             
             // 计算各策略的命中率
             std::vector<double> hitRates;
@@ -143,11 +148,24 @@ namespace XCache
             
             // 切换到最佳策略（如果提升显著）
             double currentHitRate = hitRates[static_cast<int>(currentStrategy)];
-            if (bestHitRate > currentHitRate + 0.05) // 5%的提升阈值
+            if (bestHitRate > currentHitRate + switchThreshold) // 使用可配置的切换阈值
             {
+                std::string oldStrategy = getStrategyName(currentStrategy);
                 currentStrategy = static_cast<Strategy>(bestStrategy);
-                // 重置统计，以便重新评估
-                strategyPerformance[bestStrategy] = {0, 0};
+                std::string newStrategy = getStrategyName(currentStrategy);
+                // 不重置统计，保持连续性
+            }
+        }
+        
+        std::string getStrategyName(Strategy strategy) const
+        {
+            switch (strategy)
+            {
+            case Strategy::LRU: return "LRU";
+            case Strategy::LFU: return "LFU";
+            case Strategy::LFU_AGING: return "LFU-Aging";
+            case Strategy::ARC: return "ARC";
+            default: return "Unknown";
             }
         }
 
@@ -158,10 +176,12 @@ namespace XCache
         std::unique_ptr<XLRUCache<Key, Value>> lruCache;
         std::unique_ptr<XLFUCache<Key, Value>> lfuCache;
         std::unique_ptr<XLFUCache<Key, Value>> lfuAgingCache;
+        std::unique_ptr<XCache::XArcCache<Key, Value>> arcCache;
         
         std::vector<PerformanceStats> strategyPerformance;
         std::chrono::steady_clock::time_point lastEvaluationTime;
-        std::chrono::seconds evaluationInterval;
+        std::chrono::milliseconds evaluationInterval;
+        double switchThreshold; // 可配置的切换阈值
         
         mutable std::mutex mtx;
     };
