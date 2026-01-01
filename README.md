@@ -16,9 +16,18 @@
 
 ### 主要创新点
 
-#### 1. 自适应缓存算法（核心创新）
+#### 1. 高级缓存算法实现
 
-- **多策略并行运行**：同时维护LRU、LFU、LFU-Aging和ARC四种缓存策略
+- **W-TinyLFU算法**：实现Window-TinyLFU混合策略
+  - 1% Window LRU + 99% Victim Cache设计
+  - Count-Min Sketch频率估算器
+  - 基于频率的准入策略
+  - 定期衰减机制防止频率饱和
+- **LRU-K算法**：实现K-distance缓存策略
+  - 历史队列自动设置为缓存容量的2.5倍
+  - K次访问后提升到主缓存
+  - 强大的扫描抵抗能力
+- **多策略并行运行**：同时维护LRU、LFU、LFU-Aging、ARC、W-TinyLFU和LRU-K六种缓存策略
 - **性能监控**：实时统计各策略的命中率
 - **动态切换**：根据性能数据自动选择最优策略
 - **平滑过渡**：使用可配置的切换阈值，避免频繁切换
@@ -66,6 +75,8 @@
   - LFU (Least Frequently Used)
   - LFU with Aging（改进版）
   - ARC (Adaptive Replacement Cache)
+  - W-TinyLFU (Window-TinyLFU)
+  - LRU-K (K-distance LRU)
 - **自适应算法**：根据访问模式动态选择最优缓存策略
 - 线程安全的实现，支持多线程环境
 - 模板化设计，支持任意键值类型
@@ -74,19 +85,18 @@
 
 ```
 CacheSystem/
-├── XAdaptiveCache.h         # 自适应缓存实现（核心创新）
-├── XCachePolicy.h           # 缓存策略基类接口
-├── XLRUCache.h              # LRU缓存实现
-├── XLFUCache.h              # LFU缓存实现（含改进的LFU-Aging）
-├── XArcCache/               # ARC缓存实现
-│   ├── XArcCache.h          # ARC缓存主类
-│   ├── XArcLRUpart.h        # ARC的LRU部分
-│   ├── XArcLFUpart.h        # ARC的LFU部分
-│   └── XArcCacheNode.h      # ARC缓存节点
-├── testAdaptive.cpp         # 自适应缓存测试
-├── testAllCachePolicy.cpp   # 所有缓存策略测试
-├── CMakeLists.txt           # CMake构建文件
-└── README.md                # 项目说明文档
+├── XWTinyLFUCache.h          # W-TinyLFU缓存实现
+├── XLRUCache.h               # LRU和LRU-K缓存实现
+├── XLFUCache.h               # LFU缓存实现（含改进的LFU-Aging）
+├── XCachePolicy.h            # 缓存策略基类接口
+├── XArcCache/                # ARC缓存实现
+│   ├── XArcCache.h           # ARC缓存主类
+│   ├── XArcLRUpart.h         # ARC的LRU部分
+│   ├── XArcLFUpart.h         # ARC的LFU部分
+│   └── XArcCacheNode.h       # ARC缓存节点
+├── testAllCachePolicy.cpp    # 所有缓存策略测试
+├── CMakeLists.txt            # CMake构建文件
+└── README.md                 # 项目说明文档
 ```
 
 ## 快速开始
@@ -106,21 +116,90 @@ make
 # 运行自适应缓存测试
 ./testAdaptive
 
-# 运行所有缓存策略测试P
-./testAllCachePolicy
+# 运行所有缓存策略测试
+./main
 ```
 
 ### 测试结果
 
-Adaptive在不同场景下都能选择到最适应的缓存策略：
+最新测试结果显示各算法在不同场景下的性能表现：
+
+#### 热点数据访问测试（缓存大小：20）
+- **LRU-K**: 69.33% (K-distance优势)
+- **LFU**: 66.81% (纯频率优势)
+- **ARC**: 65.38% (自适应优势)
+- **LFU-Aging**: 66.91% (带衰减的频率)
+- **W-TinyLFU**: 60.93% (频率+时间优势)
+- **LRU**: 49.60% (基准)
+
+#### 循环扫描测试（缓存大小：50）
+- **ARC**: 9.66% (扫描抵抗能力最强)
+- **LFU-Aging**: 8.86% (带衰减的频率)
+- **LFU**: 8.62% (纯频率优势)
+- **LRU-K**: 6.58% (K-distance优势)
+- **W-TinyLFU**: 6.84% (频率+时间优势)
+- **LRU**: 4.62% (基准)
+
+#### 工作负载剧烈变化测试（缓存大小：30）
+- **ARC**: 56.80% (适应性最强)
+- **LRU**: 55.23% (简单但有效)
+- **W-TinyLFU**: 54.15% (频率+时间优势)
+- **LRU-K**: 53.86% (K-distance优势)
+- **LFU-Aging**: 44.56% (带衰减的频率)
+- **LFU**: 37.31% (纯频率劣势)
 
 ![测试结果](./image/test.jpg)
+
+## 高级缓存算法详解
+
+### W-TinyLFU算法
+
+W-TinyLFU是一个高效的混合缓存策略，结合了时间局部性和频率局部性：
+
+1. **双缓存设计**：
+   - Window Cache（1%容量）：处理新访问的条目
+   - Victim Cache（99%容量）：存储较热的条目
+
+2. **Count-Min Sketch频率估算**：
+   - 多哈希函数减少冲突
+   - 固定内存占用，适合高频访问
+   - 定期衰减防止频率饱和
+
+3. **准入策略**：
+   - 基于频率比较的新条目准入机制
+   - 热点数据稳定在Victim Cache中
+   - 避免热点数据在Window/Victim间颠簸
+
+4. **数据流向**：
+   - 新数据 → Window
+   - Window命中 → 留在Window
+   - Victim命中 → 留在Victim（关键！）
+   - Window淘汰 → 通过准入策略进入Victim
+
+### LRU-K算法
+
+LRU-K是对传统LRU的改进，增加了历史访问距离的概念：
+
+1. **历史队列设计**：
+   - 容量自动设置为主缓存的2.5倍
+   - 只存储Key和访问次数，不存Value
+   - 提供足够的历史跟踪能力
+
+2. **K-distance提升机制**：
+   - Key需要被访问K次才能进入主缓存
+   - 有效抵抗一次性扫描攻击
+   - 区分真正热点和偶然访问
+
+3. **扫描抵抗能力**：
+   - 历史队列保护主缓存不被扫描数据污染
+   - 只有多次访问的数据才能提升
+   - 在循环扫描场景下表现优异
 
 ## 自适应算法详解
 
 本项目的核心创新是实现了自适应缓存算法，该算法具有以下特点：
 
-1. **多策略并行运行**：同时维护LRU、LFU、LFU-Aging和ARC四种缓存策略
+1. **多策略并行运行**：同时维护LRU、LFU、LFU-Aging、ARC、W-TinyLFU和LRU-K六种缓存策略
 2. **性能监控**：实时统计各策略的命中率
 3. **动态切换**：根据性能数据自动选择最优策略
 4. **平滑过渡**：使用可配置的切换阈值，避免频繁切换
@@ -157,8 +236,13 @@ LFU-Aging是对传统LFU策略的改进，解决了过去的热点数据最近�
 - **线程安全**：使用std::mutex保证多线程环境下的安全访问
 - **内存高效**：智能指针管理资源，避免内存泄漏
 - **性能优化**：C++17标准，充分利用现代C++特性
+- **高级算法实现**：
+  - W-TinyLFU：Window-TinyLFU混合策略
+  - LRU-K：K-distance缓存策略
+  - Count-Min Sketch：频率估算器
 - **自适应算法**：根据访问模式动态选择最优缓存策略
 - **改进的LFU-Aging**：更精细的频率衰减机制
+- **完整的测试覆盖**：多场景性能测试和对比分析
 
 ## 贡献
 
