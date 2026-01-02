@@ -12,9 +12,28 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_BUILD_TYPE Debug)
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
 
-#搜索目录下的所有.cpp源文件
+# 搜索目录下的所有.cpp源文件，但排除测试文件
 file(GLOB SOURCES "*.cpp")
+list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/cache_test.cpp")
+list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/testAllCachePolicy.cpp")
 
-#设置目标可执行文件
-add_executable(main ${SOURCES})
+#设置主程序可执行文件
+if(SOURCES)
+    add_executable(main ${SOURCES})
+endif()
+
+# 直接使用 FetchContent 下载 GTest，避免系统版本冲突
+include(FetchContent)
+FetchContent_Declare(
+    googletest
+    URL https://codeload.github.com/google/googletest/zip/refs/tags/v1.14.0
+)
+FetchContent_MakeAvailable(googletest)
+
+# 创建测试可执行文件
+add_executable(cache_test cache_test.cpp)
+target_link_libraries(cache_test GTest::gtest GTest::gtest_main)
+
+# 创建 testAllCachePolicy 可执行文件
+add_executable(testAllCachePolicy testAllCachePolicy.cpp)
 

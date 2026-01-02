@@ -167,6 +167,34 @@ public:
 
   ~XLRUKCache() = default;
 
+  bool get(Key key, Value &value) override {
+    bool inMainCache = XLRUCache<Key, Value>::get(key, value);
+
+    size_t historycount = historyList->get(key);
+    historycount++;
+    historyList->put(key, historycount);
+
+    if (inMainCache) {
+      return true;
+    }
+
+    if (historycount >= k) // 如果历史访问次数达到K次，将节点移动到主缓存中
+    {
+      std::lock_guard<std::mutex> lock(historyMtx);
+      auto it = historyMap.find(key);
+      if (it != historyMap.end()) {
+        Value storedValue = it->second;
+        historyList->remove(key);
+        historyMap.erase(it);
+        XLRUCache<Key, Value>::put(key, storedValue);
+        value = storedValue;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   Value get(Key key) {
     Value value{}; // 值初始化，避免找不到值的时候返回垃圾值
     bool inMainCache = XLRUCache<Key, Value>::get(key, value);
